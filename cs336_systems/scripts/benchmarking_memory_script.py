@@ -56,6 +56,7 @@ def main():
     parser.add_argument('--ffn_type', type=str, default = None)
     parser.add_argument('--steps_timed', type = int, default = 10)
     parser.add_argument('--warmup_steps', type=int, default=5)
+    parser.add_argument('--n_steps', type=int, default=3)
     args = parser.parse_args()
     device = args.device
     transformer_model = BasicsTransformerLM(vocab_size = args.vocab_size,
@@ -68,23 +69,41 @@ def main():
                 ).to(device)
 
     optimizer = AdamW(transformer_model.parameters())
-    for i in range(args.warmup_steps):
-        with nvtx.range(f'warmup pass {i}'):
-            backward_test(transformer_model, optimizer, args)
-            torch.cuda.synchronize()
-    forward, backward = [], []
-    for i in range(args.steps_timed):
-        with nvtx.range(f'pass {i}'):
-            f, b = backward_test(transformer_model, optimizer, args)
-            forward.append(f)
-            backward.append(b)
-            torch.cuda.synchronize()
-    forward =  np.array(forward)
-    backward = np.array(backward)
-    print(f'The mean time for the forward pass is {forward.mean()}')
-    print(f'The std of the forward pass is {forward.std()}')
-    print(f'The mean time for the backward pass is {backward.mean()}')
-    print(f'The std of the backward pass is {backward.std()}')
+    with profile(
+        activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA
+        ], 
+        schedule = torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=args.n_steps),
+        experimental_config = torch._C._profiler._ExperimentalConfig(verbose=True),
+        record_shapes = True,
+        profile_memory = True,
+        with_stack=True,
+    ) as prof:
+    
+        for i in range(args.warmup_steps):
+            with nvtx.range(f'warmup pass {i}'):
+                backward_test(transformer_model, optimizer, args)
+                torch.cuda.synchronize()
+                prof.step()
+        forward, backward = [], []
+        for i in range(args.steps_timed):
+            with nvtx.range(f'pass {i}'):
+                f, b = backward_test(transformer_model, optimizer, args)
+                forward.append(f)
+                backward.append(b)
+                torch.cuda.synchronize()
+                prof.step()
+        prof.export_memory_timeline('timeline.html', device=device)
+        torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+        torch.cuda.memory._record_memory_history(enabled=None)
+
+        forward =  np.array(forward)
+        backward = np.array(backward)
+        print(f'The mean time for the forward pass is {forward.mean()}')
+        print(f'The std of the forward pass is {forward.std()}')
+        print(f'The mean time for the backward pass is {backward.mean()}')
+        print(f'The std of the backward pass is {backward.std()}')
 
     #time the forward function
 

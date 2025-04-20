@@ -7,6 +7,7 @@ import math
 import os
 from einops import rearrange, einsum
 import einx
+import torch.cuda.nvtx as nvtx
 
 import torch
 import torch.nn as nn
@@ -227,7 +228,7 @@ class BasicsTransformerLM(nn.Module):
             n_params -= self.lm_head.weight.numel()
 
         return n_params
-
+    @nvtx.range("model fp")
     def forward(self, x: Int[Tensor, " ... sequence_length"]) -> Float[Tensor, " ... sequence_length vocab_size"]:
         """
         Args:
@@ -240,7 +241,8 @@ class BasicsTransformerLM(nn.Module):
         _, sequence_length = x.size()
 
         # (batch size, sequence_length, d_model)
-        x = self.token_embeddings(x)
+        with nvtx.range('getting token embeddings'):
+            x = self.token_embeddings(x)
 
         for layer in self.layers:
             # (batch size, sequence_length, d_model)
@@ -396,7 +398,7 @@ class SwiGLU(nn.Module):
     def forward(self, x):
         return self.w2(silu(self.w1(x)) * self.w3(x))
 
-
+@nvtx.range("scaled dot product attention")
 def scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
     K: Float[Tensor, " ... keys    d_k"],
@@ -474,7 +476,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
         self.output_proj = Linear(self.num_heads * self.d_v, self.d_model)
 
         self.positional_encoder = positional_encoder  # RoPE
-
+    @nvtx.range("MHA")
     def forward(self, x: Float[Tensor, " ... seq d_k"], token_positions: Int[Tensor, " ... seq"] | None = None) -> Float[Tensor, " ... seq d_v"]:
         """
         Args:
